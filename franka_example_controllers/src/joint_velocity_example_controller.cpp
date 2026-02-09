@@ -225,6 +225,8 @@ void JointVelocityExampleController::update(const ros::Time& /* time */,
 
       case GripperState::GRASP:
         if (release_requested_)                  // Wait for external release signal
+          // release_requested is the <atomic> boolean defined in this->init(), invoked via "r"
+          // input
         {
           ROS_INFO("Release Signal Received!");  // Log release request
           gripper_state_ = GripperState::RELEASE; // Transition to RELEASE state
