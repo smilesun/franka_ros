@@ -142,49 +142,117 @@ void JointImpedanceExampleController::starting(const ros::Time& /*time*/) {
   initial_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
 }
 
-void JointImpedanceExampleController::update(const ros::Time& /*time*/,
-                                             const ros::Duration& period) {
-  if (vel_current_ < vel_max_) {
-    vel_current_ += period.toSec() * std::fabs(vel_max_ / acceleration_time_);
-  }
-  vel_current_ = std::fmin(vel_current_, vel_max_);
+void JointImpedanceExampleController::update(const ros::Time& /*time*/,  // Control loop update
+                                             const ros::Duration& period) {  // Time since last update
+  // tau_d = coriolis_factor * coriolis + K * (q_d - q) + D * (dq_d - dq_filtered)
+  // - q_d, dq_d are the desired joint position/velocity from the robot’s trajectory generator.
+  // - q, dq_filtered are the measured joint position/velocity.
+  // - K is stiffness (spring), D is damping (damper).
+  // - Coriolis compensation helps cancel dynamics.
+  if (vel_current_ < vel_max_) {  // Ramp up velocity until the configured max
+    vel_current_ += period.toSec() * std::fabs(vel_max_ / acceleration_time_);  // Acceleration step
+  }  // End velocity ramp check
+  vel_current_ = std::fmin(vel_current_, vel_max_);  // Clamp velocity to maximum
+  // The robot’s internal trajectory generator produces q_d/dq_d for that pose, and the impedance
+  //  law uses those in the torque computation.
+  // The above line set how fast the desired motion evolves, which changes the target the impedance
+  // controller is “spring‑damping” toward.
 
-  angle_ += period.toSec() * vel_current_ / std::fabs(radius_);
-  if (angle_ > 2 * M_PI) {
-    angle_ -= 2 * M_PI;
-  }
+  angle_ += period.toSec() * vel_current_ / std::fabs(radius_);  // Advance trajectory phase
+  if (angle_ > 2 * M_PI) {  // Wrap angle after full revolution
+    angle_ -= 2 * M_PI;  // Keep angle within [0, 2*pi]
+  }  // End angle wrap
 
-  double delta_y = radius_ * (1 - std::cos(angle_));
-  double delta_z = radius_ * std::sin(angle_);
+  double delta_y = radius_ * (1 - std::cos(angle_));  // Y offset along circular path
+  double delta_z = radius_ * std::sin(angle_);  // Z offset along circular path
 
-  std::array<double, 16> pose_desired = initial_pose_;
-  pose_desired[13] += delta_y;
-  pose_desired[14] += delta_z;
-  cartesian_pose_handle_->setCommand(pose_desired);
+  std::array<double, 16> pose_desired = initial_pose_;  // Start from initial pose
+  pose_desired[13] += delta_y;  // Apply Y translation in pose matrix
+  pose_desired[14] += delta_z;  // Apply Z translation in pose matrix
+  // pose_desired is a 4×4 homogeneous transform matrix flattened into a 16‑element array (the
+  // Franka API uses column‑major order). It
+  //   represents the desired end‑effector pose.
+  //
+  //     In that layout:
+  //
+  //       index:  0  4  8 12
+  //               1  5  9 13
+  //               2  6 10 14
+  //               3  7 11 15
+  //
+  //              So:
+  //
+  //              - pose_desired[12], [13], [14] are the x, y, z translation components.
+  //              - pose_desired[13] specifically is the Y translation.
+  //
+  cartesian_pose_handle_->setCommand(pose_desired);  // Send desired Cartesian pose
 
-  franka::RobotState robot_state = cartesian_pose_handle_->getRobotState();
-  std::array<double, 7> coriolis = model_handle_->getCoriolis();
-  std::array<double, 7> gravity = model_handle_->getGravity();
+  franka::RobotState robot_state = cartesian_pose_handle_->getRobotState();  // Read robot state
+  std::array<double, 7> coriolis = model_handle_->getCoriolis();  // Get Coriolis torques
+  std::array<double, 7> gravity = model_handle_->getGravity();  // Get gravity torques
 
-  double alpha = 0.99;
-  for (size_t i = 0; i < 7; i++) {
-    dq_filtered_[i] = (1 - alpha) * dq_filtered_[i] + alpha * robot_state.dq[i];
-  }
+  double alpha = 0.99;  // Low-pass filter coefficient for joint velocities
+  for (size_t i = 0; i < 7; i++) {  // Loop over all joints
+    dq_filtered_[i] = (1 - alpha) * dq_filtered_[i] + alpha * robot_state.dq[i];  // Filter dq
+  }  // End velocity filter loop
 
-  std::array<double, 7> tau_d_calculated;
-  for (size_t i = 0; i < 7; ++i) {
-    tau_d_calculated[i] = coriolis_factor_ * coriolis[i] +
-                          k_gains_[i] * (robot_state.q_d[i] - robot_state.q[i]) +
-                          d_gains_[i] * (robot_state.dq_d[i] - dq_filtered_[i]);
-  }
+  std::array<double, 7> tau_d_calculated;  // Desired torque before rate limiting
+  for (size_t i = 0; i < 7; ++i) {  // Loop over all joints
+    tau_d_calculated[i] = coriolis_factor_ * coriolis[i] +  // Coriolis compensation
+                          k_gains_[i] * (robot_state.q_d[i] - robot_state.q[i]) +  // P term
+                          d_gains_[i] * (robot_state.dq_d[i] - dq_filtered_[i]);  // D term
+    // "desired" - "measured"
+  }  // End torque computation loop
+
+  // Bad design from franka: the desired states is stored in robot_state as well, which is
+  // automatically populated:
+  //
+  //  - Simulation (gazebo): franka_gazebo/src/franka_hw_sim.cpp lines 666–668:
+  //      ```
+  //      robot_state_.q_d[i]  = joint->getDesiredPosition(mode);
+  //      robot_state_.dq_d[i] = joint->getDesiredVelocity(mode);
+  //      robot_state_.ddq_d[i] = joint->getDesiredAcceleration(mode);
+  //      ```
+  //    This is where the “desired” joint state is written in sim.
+  //
+  //  - Real robot: franka_hw/src/franka_combinable_hw.cpp line 75:
+  //      ```
+  //      robot_state_libfranka_ = robot_->readOnce();
+  //      ```
+  //    returns a franka::RobotState from libfranka that already contains q_d. That state is then copied
+  //    into robot_state_ros_ in franka_hw/src/franka_hw.cpp line 385.
+  //
+  //    So robot_state.q_d is populated by the driver (libfranka or gazebo sim), and your controller 
+  //    just reads it.
+  //
+  // customization:
+  // Compute your own q_des and dq_des in the controller and use those in the impedance law instead
+  // of robot_state.q_d/dq_d. 
+  // Example (inside update()):
+  //
+  //           std::array<double, 7> q_des = myTrajectory(...);
+  //           std::array<double, 7> dq_des = myTrajectoryVel(...);
+  //
+//             tau_d_calculated[i] = coriolis_factor_ * coriolis[i] +
+//                                                k_gains_[i] * (q_des[i] - robot_state.q[i]) +
+//                                                                           d_gains_[i]
+//                                                                           * (dq_des[i]
+//                                                                           - dq_filtered_[i]);
+// to have dynamic desired, use
+// double t = elapsed_time_.toSec();
+//   for (size_t i = 0; i < 7; ++i) {
+//       q_des[i]  = q_start[i] + A[i] * std::sin(omega * t);
+//           dq_des[i] = A[i] * omega * std::cos(omega * t);
+//             }
+//
 
   // Maximum torque difference with a sampling rate of 1 kHz. The maximum torque rate is
   // 1000 * (1 / sampling_time).
-  std::array<double, 7> tau_d_saturated = saturateTorqueRate(tau_d_calculated, robot_state.tau_J_d);
+  std::array<double, 7> tau_d_saturated = saturateTorqueRate(tau_d_calculated, robot_state.tau_J_d);  // Rate limit
 
-  for (size_t i = 0; i < 7; ++i) {
-    joint_handles_[i].setCommand(tau_d_saturated[i]);
-  }
+  for (size_t i = 0; i < 7; ++i) {  // Loop over all joints
+    joint_handles_[i].setCommand(tau_d_saturated[i]);  // Send torque command to joint
+  }  // End torque command loop
 
   // torque_publisher_ is a ROS publisher used to publish the commanded joint torques (and sometimes
   // related diagnostics)
@@ -194,33 +262,33 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
   //
   //       So conceptually:
   //
-  //         - Controller output → applied via joint_handles_[i].setCommand(tau)
-  //           - Torque publisher → publishes those torques for visibility/debugging, typically as
+  //         - Controller output -> applied via joint_handles_[i].setCommand(tau)
+  //           - Torque publisher -> publishes those torques for visibility/debugging, typically as
   //           a ROS topic (e.g., sensor_msgs/JointState or a custom
   //               message).
   //
   //
-  if (rate_trigger_() && torques_publisher_.trylock()) {
-    std::array<double, 7> tau_j = robot_state.tau_J;
-    std::array<double, 7> tau_error;
-    double error_rms(0.0);
-    for (size_t i = 0; i < 7; ++i) {
-      tau_error[i] = last_tau_d_[i] - tau_j[i];
-      error_rms += std::sqrt(std::pow(tau_error[i], 2.0)) / 7.0;
-    }
-    torques_publisher_.msg_.root_mean_square_error = error_rms;
-    for (size_t i = 0; i < 7; ++i) {
-      torques_publisher_.msg_.tau_commanded[i] = last_tau_d_[i];
-      torques_publisher_.msg_.tau_error[i] = tau_error[i];
-      torques_publisher_.msg_.tau_measured[i] = tau_j[i];
-    }
-    torques_publisher_.unlockAndPublish();
-  }
+  if (rate_trigger_() && torques_publisher_.trylock()) {  // Publish torques at throttled rate
+    std::array<double, 7> tau_j = robot_state.tau_J;  // Measured joint torques
+    std::array<double, 7> tau_error;  // Error between commanded and measured torques
+    double error_rms(0.0);  // RMS error accumulator
+    for (size_t i = 0; i < 7; ++i) {  // Loop over all joints
+      tau_error[i] = last_tau_d_[i] - tau_j[i];  // Per-joint torque error
+      error_rms += std::sqrt(std::pow(tau_error[i], 2.0)) / 7.0;  // Accumulate RMS error
+    }  // End error computation loop
+    torques_publisher_.msg_.root_mean_square_error = error_rms;  // Store RMS error in message
+    for (size_t i = 0; i < 7; ++i) {  // Loop over all joints
+      torques_publisher_.msg_.tau_commanded[i] = last_tau_d_[i];  // Publish commanded torque
+      torques_publisher_.msg_.tau_error[i] = tau_error[i];  // Publish torque error
+      torques_publisher_.msg_.tau_measured[i] = tau_j[i];  // Publish measured torque
+    }  // End message fill loop
+    torques_publisher_.unlockAndPublish();  // Publish the message
+  }  // End throttled publish block
 
-  for (size_t i = 0; i < 7; ++i) {
-    last_tau_d_[i] = tau_d_saturated[i] + gravity[i];
-  }
-}
+  for (size_t i = 0; i < 7; ++i) {  // Loop over all joints
+    last_tau_d_[i] = tau_d_saturated[i] + gravity[i];  // Cache torque with gravity for next cycle
+  }  // End last torque update loop
+}  // End update()
 
 std::array<double, 7> JointImpedanceExampleController::saturateTorqueRate(
     const std::array<double, 7>& tau_d_calculated,
