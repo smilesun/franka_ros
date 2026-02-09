@@ -72,10 +72,33 @@ bool JointVelocityExampleController::init(hardware_interface::RobotHW* robot_har
   }
 
   input_thread_ = std::thread([this]() {
+      // It creates a new std::thread and immediately starts it. The thread runs a lambda that
+      // captures this, so it can access the current object’s members.
+      // This thread runs a loop (see the code just below) that blocks on getchar()
+      // So the line is effectively “spawn" a background input thread attached to this controller instance.”
     while (ros::ok()) {
+      // ros::ok() is a ROS utility that returns true while the node should keep running. It flips to
+      // false when ROS is shutting down (e.g., Ctrl+C, node shutdown, master down), 
+      // letting loops exit cleanly. In your code, it keeps the input thread alive until
+      // ROS is shutting down.
       char c = getchar();   // or read GPIO / serial
       if (c == 'r') {       // press r to release
         release_requested_.store(true, std::memory_order_relaxed); // binary member variable
+        // release_requested_ is std::atomic<bool> instead of a plain bool
+        //
+        //   - release_requested_ = true; calls store(true, std::memory_order_seq_cst) under the
+        //   hood. That’s the strongest ordering (sequentially consistent).
+        //   - release_requested_.store(true, std::memory_order_relaxed); stores the same value but with
+        //   relaxed ordering (no synchronization guarantees beyond atomicity).
+        //
+        //   synchronization guarantee: when one thread writes the flag, what other memory writes
+        //   are guaranteed to become visible to other threads when they see the flag change. 
+        //
+        //   So they both set the flag, but store(..., relaxed) is weaker and potentially faster. 
+        //   For a simple “signal” flag with no data dependency, relaxed is usually fine. 
+        //   If release_requested_ is a plain bool, then release_requested_ = true; is just a normal
+        //   write and is not thread-safe.
+        //
         // store is atomic but does not enforce any ordering or synchronization with other memory
         // operations.
         //
@@ -98,7 +121,7 @@ bool JointVelocityExampleController::init(hardware_interface::RobotHW* robot_har
         ROS_INFO("Release key pressed!");
       }
     }
-  });
+  }); // lambda expression
 
   release_srv_ = node_handle.advertiseService("gripper_release", &JointVelocityExampleController::releaseServiceCallback, this);
 
@@ -118,6 +141,10 @@ bool JointVelocityExampleController::init(hardware_interface::RobotHW* robot_har
 
   robot_reached_target_ = false;
   gripper_state_ = GripperState::OPEN;
+  // This initializes the controller’s gripper state machine to the OPEN state. It means that when
+  // the control loop later checks gripper_state_, it will treat the gripper as initially open 
+  // and (if the arm has reached its target) it will send a grasp command next.
+  //
   gripper_cmd_sent_ = false;
   release_requested_ = false;
   released_ = false;
@@ -146,70 +173,81 @@ void JointVelocityExampleController::update(const ros::Time& /* time */,
   double max_dq = 0.0;
 
   for (size_t i = 0; i < 7; ++i) {
-    double q = robot_state.q[i];
-    double dq = robot_state.dq[i];
-    double e = q_target[i] - q;
+    double q = robot_state.q[i];                 // Current joint position for joint i (rad)
+    double dq = robot_state.dq[i];               // Current joint velocity for joint i (rad/s)
+    double e = q_target[i] - q;                  // Position error to target for joint i
 
-    max_e = std::max(max_e, std::abs(e));
-    max_dq = std::max(max_dq, std::abs(dq));
+    max_e = std::max(max_e, std::abs(e));        // Track maximum absolute position error over all joints
+    max_dq = std::max(max_dq, std::abs(dq));     // Track maximum absolute velocity over all joints
 
-    double omega_cmd = omega_max * std::tanh(kp_ * e);
-    velocity_joint_handles_[i].setCommand(omega_cmd);
+    double omega_cmd = omega_max * std::tanh(kp_ * e); // Velocity command with smooth saturation
+    // omega_max defined in header file, which is 0.2
+    velocity_joint_handles_[i].setCommand(omega_cmd);  // Send commanded velocity to joint i
   }
   // ROS_INFO("max_e = %.6f, max_dq = %.6f", max_e,max_dq);
 
-  if (max_e < e_tol_ && max_dq < dq_tol_) {
-    stable_time_ += period;
-    if (stable_time_.toSec() > stable_duration_) {
-      robot_reached_target_ = true;
+  // e_tol defined in header file, const double e_tol_ = 4e-2;    // rad
+  // check if all joints reached target 
+  if (max_e < e_tol_ && max_dq < dq_tol_) {      // Check if position and velocity are within tolerances
+    stable_time_ += period;                      // Accumulate time spent inside tolerance
+    if (stable_time_.toSec() > stable_duration_) { // If stable long enough, declare target reached
+      robot_reached_target_ = true;              // Latch target reached flag
     }
   } else {
-    stable_time_ = ros::Duration(0.0);
+    stable_time_ = ros::Duration(0.0);           // Reset stable timer when out of tolerance
   }
 
-  if (robot_reached_target_)
+  if (robot_reached_target_)                     // Only handle gripper once arm is at target
   {
-    switch (gripper_state_)
+    switch (gripper_state_)                      // Gripper state machine
     {
       case GripperState::OPEN:
-        if (!gripper_cmd_sent_) 
+        if (!gripper_cmd_sent_)                  // Send grasp command only once
         {
-          franka_gripper::GraspGoal goal;
-          goal.width = 0.01;
-          goal.speed = 0.01;
-          goal.force = 4.0;
-          grasp_client_->sendGoal(goal);
+          franka_gripper::GraspGoal goal;        // Build grasp goal
+          goal.width = 0.01;                     // Target grasp width
+          // goal.width is the target finger opening width for the Franka gripper command. It’s the
+          // distance between the two fingers, in meters.
+          //
+          //     - For GraspGoal, goal.width = 0.01 means “close until the gap is 1 cm.”
+          //     - For MoveGoal, goal.width = 0.08 means “open to an 8 cm gap.”
+          //
+          // So it’s the desired gripper aperture.
+          //
+          goal.speed = 0.01;                     // Gripper closing speed
+          goal.force = 4.0;                      // Grasping force
+          grasp_client_->sendGoal(goal);         // Send grasp command
 
-          gripper_cmd_sent_ = true;
-          gripper_state_ = GripperState::GRASP;
+          gripper_cmd_sent_ = true;              // Remember we sent the grasp command
+          gripper_state_ = GripperState::GRASP;  // Transition to GRASP state
         }
         break;
 
       case GripperState::GRASP:
-        if (release_requested_) 
+        if (release_requested_)                  // Wait for external release signal
         {
-          ROS_INFO("Release Signal Received!");
-          gripper_state_ = GripperState::RELEASE;
+          ROS_INFO("Release Signal Received!");  // Log release request
+          gripper_state_ = GripperState::RELEASE; // Transition to RELEASE state
         }
         break;
 
       case GripperState::RELEASE:
-        if (release_requested_ && !released_) {
+        if (release_requested_ && !released_) {  // Send release command only once
           // stop_client_->sendGoal(franka_gripper::StopGoal());
 
-          franka_gripper::MoveGoal goal;
-          goal.width = 0.08;
-          goal.speed = 0.5;
-          move_client_->sendGoal(goal);
-          released_ = true;
+          franka_gripper::MoveGoal goal;         // Build release goal
+          goal.width = 0.08;                     // Target open width
+          goal.speed = 0.5;                      // Opening speed
+          move_client_->sendGoal(goal);          // Send open command
+          released_ = true;                      // Remember release was sent
         }
         break;
 
       default:
-        break;
+        break;                                   // No action for other states
     }
   }
-}
+}                                                // End update()
 
 bool JointVelocityExampleController::releaseServiceCallback(std_srvs::Trigger::Request& req, std_srvs::Trigger::Response& res)
 {
