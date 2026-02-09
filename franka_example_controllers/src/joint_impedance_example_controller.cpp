@@ -16,10 +16,17 @@ namespace franka_example_controllers {
 bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw,
                                            ros::NodeHandle& node_handle) {
   std::string arm_id;
-  if (!node_handle.getParam("arm_id", arm_id)) {
+  //In this context, arm_id is the string identifier for the Franka arm (e.g., panda). It’s used to
+  //build ROS interface/resource names like
+  //  "<arm_id>_joint1" or "/<arm_id>_controller", so the controller talks to the correct robot
+  //  instance. It’s typically read from a ROS
+  //    parameter in the controller’s init().
+  if (!node_handle.getParam("arm_id", arm_id)) {  // ROS read from config file
     ROS_ERROR("JointImpedanceExampleController: Could not read parameter arm_id");
     return false;
   }
+
+  // radius is from ROS config, used to draw circle
   if (!node_handle.getParam("radius", radius_)) {
     ROS_INFO_STREAM(
         "JointImpedanceExampleController: No parameter radius, defaulting to: " << radius_);
@@ -66,8 +73,9 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
     ROS_INFO_STREAM("JointImpedanceExampleController: publish_rate not found. Defaulting to "
                     << publish_rate);
   }
-  rate_trigger_ = franka_hw::TriggerRate(publish_rate);
-
+  rate_trigger_ = franka_hw::TriggerRate(publish_rate);  // Throttle(limit) periodic publishing to this 
+  // rate, instead of every control cycle
+  // coriolis_factor is set to be 1 in header files
   if (!node_handle.getParam("coriolis_factor", coriolis_factor_)) {
     ROS_INFO_STREAM("JointImpedanceExampleController: coriolis_factor not found. Defaulting to "
                     << coriolis_factor_);
@@ -87,7 +95,7 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
         "JointImpedanceExampleController: Exception getting model handle from interface: "
         << ex.what());
     return false;
-  }
+  } // catch
 
   auto* cartesian_pose_interface = robot_hw->get<franka_hw::FrankaPoseCartesianInterface>();
   if (cartesian_pose_interface == nullptr) {
@@ -105,7 +113,9 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
     return false;
   }
 
-  auto* effort_joint_interface = robot_hw->get<hardware_interface::EffortJointInterface>();
+  auto* effort_joint_interface = robot_hw->get<hardware_interface::EffortJointInterface>(); 
+  // EffortJointInterface defines the handle is for torque control
+
   if (effort_joint_interface == nullptr) {
     ROS_ERROR_STREAM(
         "JointImpedanceExampleController: Error getting effort joint interface from hardware");
@@ -113,6 +123,7 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
   }
   for (size_t i = 0; i < 7; ++i) {
     try {
+      // std::vector<hardware_interface::JointHandle> joint_handles_;
       joint_handles_.push_back(effort_joint_interface->getHandle(joint_names[i]));
     } catch (const hardware_interface::HardwareInterfaceException& ex) {
       ROS_ERROR_STREAM(
@@ -175,6 +186,20 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,
     joint_handles_[i].setCommand(tau_d_saturated[i]);
   }
 
+  // torque_publisher_ is a ROS publisher used to publish the commanded joint torques (and sometimes
+  // related diagnostics)
+  //   at a throttled rate. It doesn’t control the robot directly; it just broadcasts torque values
+  //   so other nodes or tools can monitor/plot/log
+  //     them.
+  //
+  //       So conceptually:
+  //
+  //         - Controller output → applied via joint_handles_[i].setCommand(tau)
+  //           - Torque publisher → publishes those torques for visibility/debugging, typically as
+  //           a ROS topic (e.g., sensor_msgs/JointState or a custom
+  //               message).
+  //
+  //
   if (rate_trigger_() && torques_publisher_.trylock()) {
     std::array<double, 7> tau_j = robot_state.tau_J;
     std::array<double, 7> tau_error;
