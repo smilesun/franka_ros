@@ -169,8 +169,8 @@ void JointVelocityExampleController::update(const ros::Time& /* time */,
 
   const auto& robot_state = state_handle_->getRobotState();
 
-  double max_e = 0.0;
-  double max_dq = 0.0;
+  double max_e = 0.0;  // max_e across joints and across trajectory
+  double max_dq = 0.0;  // max velocity across joints and across trajectory
 
   for (size_t i = 0; i < 7; ++i) {
     double q = robot_state.q[i];                 // Current joint position for joint i (rad)
