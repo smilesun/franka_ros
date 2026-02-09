@@ -75,7 +75,25 @@ bool JointVelocityExampleController::init(hardware_interface::RobotHW* robot_har
     while (ros::ok()) {
       char c = getchar();   // or read GPIO / serial
       if (c == 'r') {       // press r to release
-        release_requested_.store(true, std::memory_order_relaxed);
+        release_requested_.store(true, std::memory_order_relaxed); // binary member variable
+        // store is atomic but does not enforce any ordering or synchronization with other memory
+        // operations.
+        //
+        //   Practical effects:
+        //
+        //    - The write to release_requested_ won’t be torn or partially observed.
+        //    - But it does not guarantee when other threads see it relative to other
+        //       writes/reads. It only guarantees that the atomic itself is updated.
+        //
+        //             Why it’s okay here:
+        //
+        //              - The flag is just a simple “signal” with no data dependency. The
+        //               controller thread only needs to eventually see it as true; there’s no
+        //                   requirement to synchronize other data with it.
+        //              - If the program needed to ensure other data were visible when the
+        //                     flag changes, it would use memory_order_release for the store and
+        //                         memory_order_acquire on the load.
+        //
         triggerRunBarrier();
         ROS_INFO("Release key pressed!");
       }

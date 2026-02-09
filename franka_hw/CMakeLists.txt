@@ -79,6 +79,8 @@ add_library(franka_control_services
   src/services.cpp
 )
 
+target_compile_features(franka_control_services PUBLIC cxx_std_17)
+
 add_dependencies(franka_control_services
   ${${PROJECT_NAME}_EXPORTED_TARGETS}
   ${catkin_EXPORTED_TARGETS}
