@@ -122,7 +122,7 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
   dynamic_server_compliance_param_->setCallback(
       boost::bind(&CartesianImpedanceExampleController::complianceParamCallback, this, _1, _2));
 
-  position_d_.setZero();
+  position_d_.setZero();  // Eigen: sets all elements of the vector to 0
   orientation_d_.coeffs() << 0.0, 0.0, 0.0, 1.0;
   position_d_target_.setZero();
   orientation_d_target_.coeffs() << 0.0, 0.0, 0.0, 1.0;
@@ -346,6 +346,16 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   // locking/unlocking automatic and exception‑safe.
   //
   position_d_ = filter_params_ * position_d_target_ + (1.0 - filter_params_) * position_d_;
+  // position_d_ is the current desired end-effector position used by the controller.
+  // It starts from the robot's pose at controller start and is filtered toward position_d_target_.
+  //
+  // The Cartesian PD law uses (position - position_d_) as the position error.
+  // position_d_target_ is the raw target position received from the subscriber (e.g., interactive marker).
+  // It is not used directly; it is low-pass filtered into position_d_ for smooth motion.
+  // position_d_target_ is not random:
+  // - It is initialized in init() with setZero().
+  // - It is set to the current end-effector pose in starting().
+  // - It is updated by the equilibriumPoseCallback when new target messages arrive.
 
   orientation_d_ = orientation_d_.slerp(filter_params_, orientation_d_target_);
 }
@@ -383,7 +393,13 @@ void CartesianImpedanceExampleController::equilibriumPoseCallback(
     const geometry_msgs::PoseStampedConstPtr& msg) {
   std::lock_guard<std::mutex> position_d_target_mutex_lock(
       position_and_orientation_d_target_mutex_);
+
   position_d_target_ << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
+  // position_d_target_ is not random:
+  // - It is initialized in init() with setZero().
+  // - It is set to the current end-effector pose in starting().
+  // - This callback then updates it whenever a new equilibrium_pose message arrives.
+
   Eigen::Quaterniond last_orientation_d_target(orientation_d_target_);
   orientation_d_target_.coeffs() << msg->pose.orientation.x, msg->pose.orientation.y,
       msg->pose.orientation.z, msg->pose.orientation.w;
