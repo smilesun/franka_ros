@@ -131,29 +131,69 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   // get state variables
   franka::RobotState robot_state = state_handle_->getRobotState();
   std::array<double, 7> coriolis_array = model_handle_->getCoriolis();
+  // coriolis_array is a 7‑element (7-DOF) vector of joint‑space Coriolis torques
   std::array<double, 42> jacobian_array =
       model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
+  // jacobian_array is a vectorized 6×7 Jacobian in column‑major order (from FrankaModelInterface).
+  // That means:
+  //
+  //   - 6 rows (Cartesian: 3 linear + 3 angular)
+  //   - 7 columns (one per joint)
+  //   - Stored column by column
+  //
+  //  So the layout is:
+  //
+  //  J = [ j11 j12 ... j_{1,7}
+  //        j21 j22 ... j_{2,7}
+  //        j31 j32 ... j_{3,7}
+  //        j41 j42 ... j_{4,7}
+  //        j51 j52 ... j_{5,7}
+  //        j_{6,1} j_{6,2} ... j_{6,7} ]
+  //
+  //  jacobian_array = [j11 j21 j31 j41 j51 j61 j12 j22 j32 j42 j52 j_{6,2}  ...  
+  //  j_{1,7} j27 j37 j47 j57 j_{6,7}]
+  //
+  //
+
 
   // convert to Eigen
+  // Map:lightweight wrapper that views existing memory as an Eigen matrix/vector without copying.
   Eigen::Map<Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
   Eigen::Map<Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1>> tau_J_d(  // NOLINT (readability-identifier-naming)
       robot_state.tau_J_d.data());
-  Eigen::Affine3d transform(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+
+  // tau_J_d (often written tau_j_d) is the desired joint torque vector in franka::RobotState. It’s
+  // the last torque command that the driver/controller intended to apply.
+  //
+  //   So:
+  //
+  //    - tau_J = measured joint torque
+  //    - tau_J_d = desired/commanded joint torque
+  //
+
+  Eigen::Affine3d transform(Eigen::Matrix4d::Map(robot_state.O_T_EE.data())); 
+  //  end-effector config matrix
+  
   Eigen::Vector3d position(transform.translation());
+
   Eigen::Quaterniond orientation(transform.rotation());
 
   // compute error to desired pose
   // position error
   Eigen::Matrix<double, 6, 1> error;
+
   error.head(3) << position - position_d_;
+  // set the first 3 entries of the 6‑vector error to the position error (x, y, z). The last
+  // 3 entries (tail(3)) are used for the orientation error
 
   // orientation error
   if (orientation_d_.coeffs().dot(orientation.coeffs()) < 0.0) {
     orientation.coeffs() << -orientation.coeffs();
   }
+
   // "difference" quaternion
   Eigen::Quaterniond error_quaternion(orientation.inverse() * orientation_d_);
   error.tail(3) << error_quaternion.x(), error_quaternion.y(), error_quaternion.z();
@@ -162,7 +202,7 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
 
   // compute control
   // allocate variables
-  Eigen::VectorXd tau_task(7), tau_nullspace(7), tau_d(7);
+  Eigen::VectorXd tau_task(7), tau_nullspace(7), tau_d(7);  // 7 DoF
 
   // pseudoinverse for nullspace handling
   // kinematic pseuoinverse
@@ -172,6 +212,7 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   // Cartesian PD control with damping ratio = 1
   tau_task << jacobian.transpose() *
                   (-cartesian_stiffness_ * error - cartesian_damping_ * (jacobian * dq));
+
   // nullspace PD control with damping ratio = 1
   // Jacobian means high dimension to low dimension, which only has right inverse
   // J*(I-J^{+}J) = J-J=0
@@ -185,8 +226,37 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
                     jacobian.transpose() * jacobian_transpose_pinv) *
                        (nullspace_stiffness_ * (q_d_nullspace_ - q) -
                         (2.0 * sqrt(nullspace_stiffness_)) * dq); // desired veclocity zero: damping
+
+  // desired null space joint configuration: q_d_nullspace_ = q_initial;
+  //
   // Desired torque
   tau_d << tau_task + tau_nullspace + coriolis;
+  // Line 233 already includes gravity compensation indirectly by using the Coriolis term as
+  // returned by Franka’s model handle — but not the explicit gravity vector.
+  //
+  //   In this controller, they intentionally add only:
+  //
+  //    tau_task + tau_nullspace + coriolis
+  //
+  //  and omit gravity. 
+  //  This is a design choice: 
+  //  - either this code relies on the robot’s internal model/low‑level control to 
+  //  handle gravity
+  //  - or they keep gravity out to make the impedance “feel” more compliant 
+  //  (depending on mode).   
+  //
+  //*************When gravity not added*************************************************************
+  // It won’t just “fall,” because the impedance terms (task‑space stiffness + nullspace stiffness)
+  // generate torques that resist motion and hold the pose. That effectively counters gravity, 
+  // but only as much as the gains allow. What you’ll see if gravity isn’t explicitly added:
+  // - The arm may sag or settle to a slightly different equilibrium under gravity.
+  // - The amount depends on stiffness/damping and payload.
+  // - With low gains, the droop can be noticeable.
+  //
+  // So: no gravity term doesn’t mean free‑fall; it means the controller must “fight gravity” through 
+  // stiffness, which can lead to steady‑state error unless gains are high.
+  //
+  //
   // Saturate torque rate to avoid discontinuities
   tau_d << saturateTorqueRate(tau_d, tau_J_d);
   for (size_t i = 0; i < 7; ++i) {
