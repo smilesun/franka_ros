@@ -179,6 +179,7 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,  // Cont
   }  // End angle wrap
 
   double delta_y = radius_ * (1 - std::cos(angle_));  // Y offset along circular path
+  // This is a circle centered at ((y,z) = (r,0)) in the Y–Z plane.
   double delta_z = radius_ * std::sin(angle_);  // Z offset along circular path
 
   std::array<double, 16> pose_desired = initial_pose_;  // Start from initial pose
