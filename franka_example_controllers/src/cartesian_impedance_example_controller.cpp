@@ -19,9 +19,37 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
   std::vector<double> cartesian_stiffness_vector;
   std::vector<double> cartesian_damping_vector;
 
-  sub_equilibrium_pose_ = node_handle.subscribe(
-      "equilibrium_pose", 20, &CartesianImpedanceExampleController::equilibriumPoseCallback, this,
-      ros::TransportHints().reliable().tcpNoDelay());
+  sub_equilibrium_pose_ = node_handle.subscribe(  // Subscribe to pose target updates
+      "equilibrium_pose",  // Topic name relative to this node handle namespace
+      20,  // Queue size: buffer up to 20 messages if callbacks lag
+      &CartesianImpedanceExampleController::equilibriumPoseCallback,  // Callback on new pose
+      this,  // Callback is a member function on this instance
+      ros::TransportHints().reliable().tcpNoDelay());  // TCP transport: reliable, no Nagle delay
+  // Callback mechanism (how data flows):
+  // - A publisher (e.g., RViz interactive marker or another node) sends PoseStamped messages to the
+  //   "equilibrium_pose" topic.
+  // - ROS delivers each message to this subscriber and invokes
+  //   CartesianImpedanceExampleController::equilibriumPoseCallback(...).
+  // - The callback typically locks a mutex and updates position_d_target_ / orientation_d_target_.
+  // - The real-time update loop later reads those targets (under the same mutex) to compute torques.
+  //
+  // Queue behavior (what happens on lag):
+  // - The queue stores up to 20 messages if callbacks are slower than incoming messages.
+  // - If messages arrive faster than they are processed, the queue eventually fills.
+  // - Once full, ROS drops older messages (so the callback sees the most recent pose, not every pose).
+  // - This keeps the controller responsive to the latest target but can skip intermediate updates.
+  //
+  // In this example setup, the publisher is the interactive marker node:
+  // - franka_example_controllers/scripts/interactive_marker.py publishes PoseStamped on
+  //   "equilibrium_pose".
+  // - RViz displays the marker; dragging it updates marker_pose in that script.
+  // - A timer in the script publishes the pose at ~200 Hz, so the controller tracks the marker.
+  //
+  // Real-robot note:
+  // - If you are not running RViz/interactive_marker, there may be no publisher at all.
+  // - A human moving the end-effector does NOT publish equilibrium_pose messages.
+  // - In that case the controller keeps the last target pose, and hand motion creates error
+  //   the controller pushes against.
 
   std::string arm_id;
   if (!node_handle.getParam("arm_id", arm_id)) {
@@ -103,7 +131,7 @@ bool CartesianImpedanceExampleController::init(hardware_interface::RobotHW* robo
   cartesian_damping_.setZero();
 
   return true;
-}
+} // init
 
 void CartesianImpedanceExampleController::starting(const ros::Time& /*time*/) {
   // compute initial velocity with jacobian and set x_attractor and q_d_nullspace
@@ -273,9 +301,52 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
       filter_params_ * cartesian_damping_target_ + (1.0 - filter_params_) * cartesian_damping_;
   nullspace_stiffness_ =
       filter_params_ * nullspace_stiffness_target_ + (1.0 - filter_params_) * nullspace_stiffness_;
-  std::lock_guard<std::mutex> position_d_target_mutex_lock(
-      position_and_orientation_d_target_mutex_);
+
+  // the following variables are defined in
+  // header:55  std::mutex position_and_orientation_d_target_mutex_;
+  // header:56  Eigen::Vector3d position_d_target_;
+  // header:57  Eigen::Quaterniond orientation_d_target_;
+  // 
+  //  A mutex doesn’t “belong” to data automatically. It’s just a lock object. You assign meaning by
+  //  how you use it.
+  //
+  //    In this controller, position_and_orientation_d_target_mutex_ is used to protect
+  //    position_d_target_ and orientation_d_target_:
+  //
+  //      - It is locked in update() before reading those targets.
+  //        - It should also be locked in the callback that writes them (equilibriumPoseCallback
+  //        / dynamic reconfigure).
+  //
+  //          So the correspondence is by convention: “this mutex guards these variables,” enforced
+  //          by always locking it when accessing them. If you want, I can point to the exact
+  //          callback
+  //            lines where it’s locked on writes.
+  //
+  std::lock_guard<std::mutex> position_d_target_mutex_lock(  // Lock target pose updates
+  // note position_d_target_mutex_lock is type std::lock_guard! not std::mutex!
+      position_and_orientation_d_target_mutex_);  // Protects position_d_target_ and orientation_d_target_
+  // Those lines use a mutex lock to safely read position_d_target_ and orientation_d_target_ while
+  // another thread (e.g., dynamic reconfigure or interactive marker callback) might be updating them.
+  //
+  //     Mechanism:
+  //
+  //       - std::lock_guard<std::mutex> locks the mutex immediately.
+  //       - It holds the lock for the rest of the scope.
+  //        - When the scope ends, the lock is released automatically.
+  //
+  //  So the update loop sees a consistent target pose without data races.
+  //
+  // std::lock_guard<std::mutex> position_d_target_mutex_lock(position_and_orientation_d_target_mutex_);
+  // There are two variables:
+  // 1. position_and_orientation_d_target_mutex_
+  //    This is the mutex (the lockable object) that protects shared data.
+  // 2. position_d_target_mutex_lock
+  //    This is a lock_guard object. Its constructor locks the mutex, and its destructor unlocks it.
+  // So one is the lock, the other is the thing being locked. The lock_guard “wraps” the mutex to make 
+  // locking/unlocking automatic and exception‑safe.
+  //
   position_d_ = filter_params_ * position_d_target_ + (1.0 - filter_params_) * position_d_;
+
   orientation_d_ = orientation_d_.slerp(filter_params_, orientation_d_target_);
 }
 
