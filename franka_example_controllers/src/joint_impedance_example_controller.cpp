@@ -105,7 +105,7 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
   }
   try {
     cartesian_pose_handle_ = std::make_unique<franka_hw::FrankaCartesianPoseHandle>(
-        cartesian_pose_interface->getHandle(arm_id + "_robot"));
+        cartesian_pose_interface->getHandle(arm_id + "_robot"));  // arm_id from ROS
   } catch (hardware_interface::HardwareInterfaceException& ex) {
     ROS_ERROR_STREAM(
         "JointImpedanceExampleController: Exception getting cartesian pose handle from interface: "
@@ -136,10 +136,13 @@ bool JointImpedanceExampleController::init(hardware_interface::RobotHW* robot_hw
   std::fill(dq_filtered_.begin(), dq_filtered_.end(), 0);
 
   return true;
-}
+}  // init
 
 void JointImpedanceExampleController::starting(const ros::Time& /*time*/) {
-  initial_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
+  // Capture the desired end-effector pose at controller start.
+  // This becomes the reference pose that the later circular offsets are applied to.
+  initial_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;  // Cache desired EE pose at start
+  // O_T_EE_d is the 4×4 transform of the desired end‑effector pose in the base frame.
 }
 
 void JointImpedanceExampleController::update(const ros::Time& /*time*/,  // Control loop update
@@ -151,6 +154,7 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,  // Cont
   // - Coriolis compensation helps cancel dynamics.
   if (vel_current_ < vel_max_) {  // Ramp up velocity until the configured max
     vel_current_ += period.toSec() * std::fabs(vel_max_ / acceleration_time_);  // Acceleration step
+    // acceleration_time_ is the time velocity ramps from 0 to vel_max
   }  // End velocity ramp check
   vel_current_ = std::fmin(vel_current_, vel_max_);  // Clamp velocity to maximum
   // The robot’s internal trajectory generator produces q_d/dq_d for that pose, and the impedance
@@ -158,7 +162,18 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,  // Cont
   // The above line set how fast the desired motion evolves, which changes the target the impedance
   // controller is “spring‑damping” toward.
 
+  // draw circle with radius
   angle_ += period.toSec() * vel_current_ / std::fabs(radius_);  // Advance trajectory phase
+  //  For circular motion, linear speed (v) and angular speed (\dot{\theta}) are related by:
+  //    [
+  //      v = r \cdot \dot{\theta}
+  //    ]
+  //          So:
+  //    [
+  //      \dot{\theta} = \frac{v}{r}
+  //    ]
+  //  It converts linear tangential speed into how fast the angle should advance around the circle.
+  //
   if (angle_ > 2 * M_PI) {  // Wrap angle after full revolution
     angle_ -= 2 * M_PI;  // Keep angle within [0, 2*pi]
   }  // End angle wrap
@@ -188,6 +203,14 @@ void JointImpedanceExampleController::update(const ros::Time& /*time*/,  // Cont
   cartesian_pose_handle_->setCommand(pose_desired);  // Send desired Cartesian pose
 
   franka::RobotState robot_state = cartesian_pose_handle_->getRobotState();  // Read robot state
+  // Note: setCommand() above does not write robot_state.q_d directly.
+  // The driver (libfranka / gazebo sim) fills q_d based on the active command interface.
+  // So q_d reflects the internally generated desired joint state derived from the pose command.
+
+  // e.g.
+  // cartesian_pose_handle_->getRobotState().O_T_EE_d;  // Cache desired EE pose at start
+  // O_T_EE_d is the 4×4 transform of the desired end‑effector pose in the base frame.
+
   std::array<double, 7> coriolis = model_handle_->getCoriolis();  // Get Coriolis torques
   std::array<double, 7> gravity = model_handle_->getGravity();  // Get gravity torques
 
