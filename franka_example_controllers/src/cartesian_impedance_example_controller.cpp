@@ -260,7 +260,8 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   // desired null space joint configuration: q_d_nullspace_ = q_initial;
   //
   // Desired torque
-  tau_d << tau_task + tau_nullspace + coriolis + gravity;
+  tau_d << tau_task + tau_nullspace + coriolis;  // original libfrank code does not compensate gravity
+  // tau_d << tau_task + tau_nullspace + coriolis + gravity;
   // Line 233 already includes gravity compensation indirectly by using the Coriolis term as
   // returned by Franka’s model handle — but not the explicit gravity vector.
   //
