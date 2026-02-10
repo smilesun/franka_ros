@@ -247,13 +247,14 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   // Jacobian means high dimension to low dimension, which only has right inverse
   // J*(I-J^{+}J) = J-J=0
   //
-  // J^T maps low to high, only has left inverse: left inverse bring high dime to low
+  // J^T maps low to high (force to torque), 
+  // only has left inverse: left inverse bring high dim to low: torque to force
   // (J^T)^{+}(I-J^T(J^T)^{+}) = (J^T)^{+}-(J^T)^{+} = 0
   // desire q_0 can be 
   // - in proportional form \dot{q_0} = -k(q-q_{des})  
   // - gradient w.r.t. loss function: \dot{q_0}=-\nabla_q L(q,q_{des})
   tau_nullspace << (Eigen::MatrixXd::Identity(7, 7) -
-                    jacobian.transpose() * jacobian_transpose_pinv) *
+                    jacobian.transpose() * jacobian_transpose_pinv) * // (J^T)^{+} maps q to x
                        (nullspace_stiffness_ * (q_d_nullspace_ - q) -
                         (2.0 * sqrt(nullspace_stiffness_)) * dq); // desired veclocity zero: damping
 
