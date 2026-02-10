@@ -176,7 +176,7 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   // Jacobian means high dimension to low dimension, which only has right inverse
   // J*(I-J^{+}J) = J-J=0
   //
-  // J^T maps low to high, only has left inverse
+  // J^T maps low to high, only has left inverse: left inverse bring high dime to low
   // (J^T)^{+}(I-J^T(J^T)^{+}) = (J^T)^{+}-(J^T)^{+} = 0
   // desire q_0 can be 
   // - in proportional form \dot{q_0} = -k(q-q_{des})  
