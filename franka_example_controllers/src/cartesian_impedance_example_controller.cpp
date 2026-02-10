@@ -131,6 +131,7 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   // get state variables
   franka::RobotState robot_state = state_handle_->getRobotState();
   std::array<double, 7> coriolis_array = model_handle_->getCoriolis();
+  std::array<double, 7> gravity_array = model_handle_->getGravity();
   // coriolis_array is a 7‑element (7-DOF) vector of joint‑space Coriolis torques
   std::array<double, 42> jacobian_array =
       model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
@@ -159,6 +160,7 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   // convert to Eigen
   // Map:lightweight wrapper that views existing memory as an Eigen matrix/vector without copying.
   Eigen::Map<Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
+  Eigen::Map<Eigen::Matrix<double, 7, 1>> gravity(gravity_array.data());
   Eigen::Map<Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
@@ -230,7 +232,7 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   // desired null space joint configuration: q_d_nullspace_ = q_initial;
   //
   // Desired torque
-  tau_d << tau_task + tau_nullspace + coriolis;
+  tau_d << tau_task + tau_nullspace + coriolis + gravity;
   // Line 233 already includes gravity compensation indirectly by using the Coriolis term as
   // returned by Franka’s model handle — but not the explicit gravity vector.
   //
