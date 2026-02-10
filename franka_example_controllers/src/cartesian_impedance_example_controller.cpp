@@ -173,10 +173,18 @@ void CartesianImpedanceExampleController::update(const ros::Time& /*time*/,
   tau_task << jacobian.transpose() *
                   (-cartesian_stiffness_ * error - cartesian_damping_ * (jacobian * dq));
   // nullspace PD control with damping ratio = 1
+  // Jacobian means high dimension to low dimension, which only has right inverse
+  // J*(I-J^{+}J) = J-J=0
+  //
+  // J^T maps low to high, only has left inverse
+  // (J^T)^{+}(I-J^T(J^T)^{+}) = (J^T)^{+}-(J^T)^{+} = 0
+  // desire q_0 can be 
+  // - in proportional form \dot{q_0} = -k(q-q_{des})  
+  // - gradient w.r.t. loss function: \dot{q_0}=-\nabla_q L(q,q_{des})
   tau_nullspace << (Eigen::MatrixXd::Identity(7, 7) -
                     jacobian.transpose() * jacobian_transpose_pinv) *
                        (nullspace_stiffness_ * (q_d_nullspace_ - q) -
-                        (2.0 * sqrt(nullspace_stiffness_)) * dq);
+                        (2.0 * sqrt(nullspace_stiffness_)) * dq); // desired veclocity zero: damping
   // Desired torque
   tau_d << tau_task + tau_nullspace + coriolis;
   // Saturate torque rate to avoid discontinuities
